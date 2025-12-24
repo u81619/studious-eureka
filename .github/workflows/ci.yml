@@ -2,59 +2,109 @@ name: iOS CI Pipeline
 
 on:
   push:
-    branches: [ main, develop ]
+    branches: [main]
   pull_request:
-    branches: [ main ]
+    branches: [main]
 
 jobs:
   build-and-test:
     runs-on: macos-latest
-    
-    steps:
-    - name: التحقق من الكود
-      uses: actions/checkout@v3
-      
-    - name: تحديد إصدار Xcode
-      run: sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
-      
-    - name: إظهار إصدار Xcode
-      run: xcodebuild -version
-      
-    - name: بناء المشروع
-      run: |
-        make build
-      
-    - name: تشغيل الاختبارات
-      run: |
-        make test
-      
-    - name: فحص الكود
-      run: |
-        make lint || true
-        
-    - name: إنشاء الأرشيف
-      if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-      run: |
-        make archive
-        
-    - name: رفع الأرشيف
-      if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-      uses: actions/upload-artifact@v3
-      with:
-        name: app-archive
-        path: build/SimpleTableApp.xcarchive
+    timeout-minutes: 30
 
-  code-quality:
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: "15.0"
+
+      - name: Install Apple Certificate and Provisioning Profile
+        env:
+          BUILD_CERTIFICATE_BASE64: ${{ secrets.BUILD_CERTIFICATE_BASE64 }}
+          P12_PASSWORD: ${{ secrets.P12_PASSWORD }}
+          BUILD_PROVISION_PROFILE_BASE64: ${{ secrets.BUILD_PROVISION_PROFILE_BASE64 }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+        run: |
+          # إنشاء مسارات الملفات
+          CERTIFICATE_PATH=$RUNNER_TEMP/build_certificate.p12
+          PP_PATH=$RUNNER_TEMP/build_pp.mobileprovision
+          KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
+
+          # استيراد الشهادة والملف التعريفي من الأسرار
+          echo -n "$BUILD_CERTIFICATE_BASE64" | base64 --decode --output $CERTIFICATE_PATH
+          echo -n "$BUILD_PROVISION_PROFILE_BASE64" | base64 --decode --output $PP_PATH
+
+          # إنشاء Keychain جديد
+          security create-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+          security set-keychain-settings -lut 21600 $KEYCHAIN_PATH
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+
+          # استيراد الشهادة إلى Keychain
+          security import $CERTIFICATE_PATH -P "$P12_PASSWORD" -A -t cert -f pkcs12 -k $KEYCHAIN_PATH
+          security set-key-partition-list -S apple-tool:,apple: -k "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+
+          # استيراد الملف التعريفي
+          mkdir -p ~/Library/MobileDevice/Provisioning\ Profiles
+          cp $PP_PATH ~/Library/MobileDevice/Provisioning\ Profiles/
+
+      - name: Build the iOS App
+        run: |
+          xcodebuild clean build \
+            -project SimpleTableApp.xcodeproj \
+            -scheme SimpleTableApp \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            CODE_SIGN_STYLE="Manual" \
+            OTHER_CODE_SIGN_FLAGS="--keychain $RUNNER_TEMP/app-signing.keychain-db"
+
+      - name: Archive the iOS App
+        run: |
+          xcodebuild archive \
+            -project SimpleTableApp.xcodeproj \
+            -scheme SimpleTableApp \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -archivePath ./build/SimpleTableApp.xcarchive \
+            CODE_SIGN_STYLE="Manual" \
+            OTHER_CODE_SIGN_FLAGS="--keychain $RUNNER_TEMP/app-signing.keychain-db"
+
+      - name: Sanitize Archive Name
+        id: sanitize_name
+        run: |
+          # استبدال الأحرف الخاصة لضمان توافق اسم الأرشفة مع upload-artifact@v4[citation:10]
+          SANITIZED_NAME="SimpleTableApp_Archive_${{ github.run_number }}"
+          SANITIZED_NAME="${SANITIZED_NAME//|/_}"
+          SANITIZED_NAME="${SANITIZED_NAME//\*/_}"
+          echo "sanitized_name=$SANITIZED_NAME" >> $GITHUB_OUTPUT
+
+      - name: Upload App Archive (Updated to v4)
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.sanitize_name.outputs.sanitized_name }}
+          path: ./build/SimpleTableApp.xcarchive
+          retention-days: 7
+          compression-level: 0 # تعطيل الضغط للملفات الكبيرة لتسريع الرفع[citation:1]
+
+      - name: Run Unit Tests
+        run: |
+          xcodebuild test \
+            -project SimpleTableApp.xcodeproj \
+            -scheme SimpleTableApp \
+            -destination 'platform=iOS Simulator,name=iPhone 15,OS=latest'
+
+  deploy:
+    needs: build-and-test
     runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     
     steps:
-    - name: التحقق من الكود
-      uses: actions/checkout@v3
-      
-    - name: فحص الملفات
-      run: |
-        echo "📁 هيكل المشروع:"
-        find . -type f -name "*.swift" | head -10
-        echo ""
-        echo "📊 حجم المشروع:"
-        find . -name "*.swift" -exec wc -l {} + | tail -1
+      - name: Download App Archive (Updated to v4)
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.build-and-test.outputs.sanitized_name }}
+          path: ./downloaded-artifact
+
+      - name: List Downloaded Files
+        run: ls -la ./downloaded-artifact
