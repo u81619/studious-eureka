@@ -18,7 +18,6 @@ jobs:
       - name: Set up Xcode (إصلاح: استخدام إصدار متاح)
         uses: maxim-lobanov/setup-xcode@v1
         with:
-          # تم التغيير من '15.0' إلى إصدار متوفر على Runner
           xcode-version: '16.4'
 
       - name: Show Xcode version for verification
@@ -29,328 +28,4 @@ jobs:
           echo "🔧 إصدار Swift:"
           swift --version
 
-      - name: Install Apple Certificate and Provisioning Profile (إصلاح: مشكلة فك الترميز)
-        env:
-          BUILD_CERTIFICATE_BASE64: ${{ secrets.BUILD_CERTIFICATE_BASE64 }}
-          P12_PASSWORD: ${{ secrets.P12_PASSWORD }}
-          BUILD_PROVISION_PROFILE_BASE64: ${{ secrets.BUILD_PROVISION_PROFILE_BASE64 }}
-          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
-        run: |
-          # ========== التحقق من الأسرار ==========
-          echo "🔍 جاري التحقق من وجود الأسرار المطلوبة..."
-          
-          if [ -z "$BUILD_CERTIFICATE_BASE64" ] || [ "$BUILD_CERTIFICATE_BASE64" = "" ]; then
-            echo "❌ خطأ: BUILD_CERTIFICATE_BASE64 فارغ أو غير معين"
-            echo "   يرجى إضافة السر في Settings → Secrets → Actions"
-            exit 1
-          fi
-          
-          if [ -z "$BUILD_PROVISION_PROFILE_BASE64" ] || [ "$BUILD_PROVISION_PROFILE_BASE64" = "" ]; then
-            echo "❌ خطأ: BUILD_PROVISION_PROFILE_BASE64 فارغ أو غير معين"
-            exit 1
-          fi
-          
-          # ========== إنشاء المسارات ==========
-          CERTIFICATE_PATH="$RUNNER_TEMP/build_certificate.p12"
-          PP_PATH="$RUNNER_TEMP/build_pp.mobileprovision"
-          KEYCHAIN_PATH="$RUNNER_TEMP/app-signing.keychain-db"
-          
-          echo "📁 مسارات الملفات:"
-          echo "   الشهادة: $CERTIFICATE_PATH"
-          echo "   ملف التعريف: $PP_PATH"
-          echo "   Keychain: $KEYCHAIN_PATH"
-          
-          # ========== إنشاء Keychain جديد ==========
-          echo "🔐 جاري إنشاء Keychain جديد..."
-          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
-          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
-          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
-          
-          # تفعيل Keychain كافتراضي للبناء
-          security default-keychain -s "$KEYCHAIN_PATH"
-          security list-keychains -d user -s "$KEYCHAIN_PATH"
-          
-          # ========== فك ترميز واستيراد الشهادة ==========
-          echo "📥 جاري فك ترميز الشهادة..."
-          
-          # طريقة محسنة لفك الترميز مع معالجة الأحرف الجديدة
-          CLEAN_CERT=$(echo "$BUILD_CERTIFICATE_BASE64" | tr -d '\n\r' | sed 's/ //g')
-          echo "$CLEAN_CERT" | base64 --decode --output "$CERTIFICATE_PATH" 2>/dev/null || {
-            echo "⚠️  فشلت المحاولة الأولى، جرب طريقة بديلة..."
-            echo "$BUILD_CERTIFICATE_BASE64" | base64 --decode --ignore-garbage --output "$CERTIFICATE_PATH" 2>/dev/null || {
-              echo "❌ فشل فك ترميز الشهادة تمامًا"
-              echo "   تحقق من صيغة Base64 للسر BUILD_CERTIFICATE_BASE64"
-              echo "   الطول: ${#BUILD_CERTIFICATE_BASE64} حرف"
-              echo "   أول 50 حرف: ${BUILD_CERTIFICATE_BASE64:0:50}"
-              exit 1
-            }
-          }
-          
-          # التحقق من حجم الملف المفكوك
-          CERT_SIZE=$(wc -c < "$CERTIFICATE_PATH")
-          echo "   ✅ تم فك ترميز الشهادة، الحجم: $CERT_SIZE بايت"
-          
-          if [ $CERT_SIZE -lt 100 ]; then
-            echo "❌ ملف الشهادة صغير جدًا (قد يكون ترميز Base64 خاطئ)"
-            exit 1
-          fi
-          
-          # التحقق من نوع الملف
-          echo "   نوع الملف:"
-          file "$CERTIFICATE_PATH"
-          
-          # ========== استيراد الشهادة إلى Keychain ==========
-          echo "🔑 جاري استيراد الشهادة إلى Keychain..."
-          
-          if [ -z "$P12_PASSWORD" ] || [ "$P12_PASSWORD" = "" ]; then
-            echo "   ⚠️  P12_PASSWORD فارغ، جرب الاستيراد بدون كلمة مرور"
-            IMPORT_CMD="security import \"$CERTIFICATE_PATH\" -A -t cert -f pkcs12 -k \"$KEYCHAIN_PATH\" -T /usr/bin/codesign"
-          else
-            echo "   🔑 استخدام كلمة المرور المزودة"
-            IMPORT_CMD="security import \"$CERTIFICATE_PATH\" -P \"$P12_PASSWORD\" -A -t cert -f pkcs12 -k \"$KEYCHAIN_PATH\" -T /usr/bin/codesign"
-          fi
-          
-          eval $IMPORT_CMD 2>&1 | while read line; do
-            echo "   $line"
-          done
-          
-          if [ ${PIPESTATUS[0]} -ne 0 ]; then
-            echo "❌ فشل استيراد الشهادة"
-            echo "   جرب مع خيارات مختلفة..."
-            
-            # تجربة بدون -T /usr/bin/codesign
-            security import "$CERTIFICATE_PATH" -P "$P12_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH" 2>&1 || {
-              echo "❌ فشل استيراد الشهادة تمامًا"
-              exit 1
-            }
-          fi
-          
-          # إعداد أذونات Keychain
-          echo "   🔧 إعداد أذونات Keychain..."
-          security set-key-partition-list -S "apple-tool:,apple:,codesign:" -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
-          
-          # ========== فك ترميز واستيراد ملف التعريف ==========
-          echo "📋 جاري فك ترميز ملف التعريف (Provisioning Profile)..."
-          
-          # تنظيف بيانات Base64 لملف التعريف
-          CLEAN_PP=$(echo "$BUILD_PROVISION_PROFILE_BASE64" | tr -d '\n\r' | sed 's/ //g')
-          echo "$CLEAN_PP" | base64 --decode --output "$PP_PATH" 2>/dev/null || {
-            echo "❌ فشل فك ترميز ملف التعريف"
-            exit 1
-          }
-          
-          # استخراج UUID من ملف التعريف
-          PP_UUID=$(/usr/libexec/PlistBuddy -c 'Print :UUID' /dev/stdin <<< $(security cms -D -i "$PP_PATH" 2>/dev/null) 2>/dev/null || echo "unknown_uuid")
-          
-          if [ -z "$PP_UUID" ] || [ "$PP_UUID" = "" ]; then
-            PP_UUID="profile_$RANDOM"
-          fi
-          
-          echo "   ✅ تم فك ترميز ملف التعريف، UUID: $PP_UUID"
-          
-          # نسخ ملف التعريف إلى المكان الصحيح
-          mkdir -p ~/Library/MobileDevice/Provisioning\ Profiles
-          cp "$PP_PATH" ~/Library/MobileDevice/Provisioning\ Profiles/"$PP_UUID".mobileprovision
-          
-          # ========== التحقق النهائي ==========
-          echo "✅ التحقق من التثبيت..."
-          
-          echo "   📋 الشهادات في Keychain:"
-          security find-identity -v -p codesigning "$KEYCHAIN_PATH" 2>&1 | head -10 || echo "   ⚠️  لا توجد شهادات أو حدث خطأ"
-          
-          echo "   📁 ملفات التعريف المثبتة:"
-          ls -la ~/Library/MobileDevice/Provisioning\ Profiles/ 2>&1 | head -5 || echo "   ⚠️  لا توجد ملفات تعريف"
-          
-          echo "🎉 تم تثبيت الشهادة وملف التعريف بنجاح!"
-
-      - name: Build the iOS App (بدون توقيع للاختبار)
-        id: build_app
-        run: |
-          echo "🏗️  جاري بناء التطبيق..."
-          
-          # بناء بدون توقيع أولاً للاختبار
-          xcodebuild clean build \
-            -project SimpleTableApp.xcodeproj \
-            -scheme SimpleTableApp \
-            -configuration Debug \
-            -destination 'generic/platform=iOS Simulator' \
-            CODE_SIGN_IDENTITY="" \
-            CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGNING_ALLOWED=NO 2>&1 | tee build.log
-          
-          if [ ${PIPESTATUS[0]} -eq 0 ]; then
-            echo "✅ تم البناء بنجاح (بدون توقيع)"
-            echo "build_status=success" >> $GITHUB_OUTPUT
-          else
-            echo "❌ فشل البناء"
-            echo "build_status=failed" >> $GITHUB_OUTPUT
-            echo "=== آخر 20 سطر من سجل البناء ==="
-            tail -20 build.log
-            exit 1
-          fi
-
-      - name: Build with Signing (If secrets exist)
-        if: env.BUILD_CERTIFICATE_BASE64 != '' && env.BUILD_PROVISION_PROFILE_BASE64 != '' && steps.build_app.outputs.build_status == 'success'
-        run: |
-          echo "🔏 جاري البناء مع التوقيع..."
-          
-          # البحث عن معرف الشهادة
-          CERT_IDENTITY=$(security find-identity -v -p codesigning "$RUNNER_TEMP/app-signing.keychain-db" | grep ")" | head -1 | cut -d '"' -f 2)
-          
-          if [ -z "$CERT_IDENTITY" ]; then
-            echo "⚠️  لم يتم العثور على شهادة توقيع، البناء بدون توقيع"
-            CERT_IDENTITY=""
-            PROVISIONING_PROFILE_SPECIFIER=""
-          else
-            echo "   ✅ استخدام شهادة التوقيع: $CERT_IDENTITY"
-            PROVISIONING_PROFILE_SPECIFIER="PROVISIONING_PROFILE_SPECIFIER"
-          fi
-          
-          # البناء مع التوقيع (إن وجد)
-          xcodebuild clean build \
-            -project SimpleTableApp.xcodeproj \
-            -scheme SimpleTableApp \
-            -configuration Release \
-            -destination 'generic/platform=iOS' \
-            CODE_SIGN_IDENTITY="$CERT_IDENTITY" \
-            OTHER_CODE_SIGN_FLAGS="--keychain $RUNNER_TEMP/app-signing.keychain-db" \
-            $PROVISIONING_PROFILE_SPECIFIER 2>&1 | tee build_signed.log
-          
-          if [ ${PIPESTATUS[0]} -eq 0 ]; then
-            echo "✅ تم البناء مع التوقيع بنجاح"
-          else
-            echo "❌ فشل البناء مع التوقيع"
-            echo "=== آخر 20 سطر من سجل البناء ==="
-            tail -20 build_signed.log
-            # لا ننهي العملية هنا، نتابع بدون توقيع
-          fi
-
-      - name: Archive the iOS App (للإصدار)
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        run: |
-          echo "📦 جاري أرشفة التطبيق للإصدار..."
-          
-          # البحث عن معرف الشهادة
-          CERT_IDENTITY=$(security find-identity -v -p codesigning "$RUNNER_TEMP/app-signing.keychain-db" | grep ")" | head -1 | cut -d '"' -f 2)
-          
-          if [ -z "$CERT_IDENTITY" ]; then
-            echo "⚠️  لا يمكن الأرشفة بدون شهادة توقيع صالحة"
-            echo "archive_status=no_certificate" >> $GITHUB_ENV
-            exit 0
-          fi
-          
-          echo "   🔏 الأرشفة باستخدام الشهادة: $CERT_IDENTITY"
-          
-          xcodebuild archive \
-            -project SimpleTableApp.xcodeproj \
-            -scheme SimpleTableApp \
-            -configuration Release \
-            -destination 'generic/platform=iOS' \
-            -archivePath ./build/SimpleTableApp.xcarchive \
-            CODE_SIGN_IDENTITY="$CERT_IDENTITY" \
-            OTHER_CODE_SIGN_FLAGS="--keychain $RUNNER_TEMP/app-signing.keychain-db" \
-            PROVISIONING_PROFILE_SPECIFIER 2>&1 | tee archive.log
-          
-          if [ ${PIPESTATUS[0]} -eq 0 ]; then
-            echo "✅ تم الأرشفة بنجاح"
-            echo "archive_status=success" >> $GITHUB_ENV
-            
-            # التحقق من وجود الأرشيف
-            if [ -d "./build/SimpleTableApp.xcarchive" ]; then
-              echo "📁 حجم الأرشيف:"
-              du -sh ./build/SimpleTableApp.xcarchive
-            fi
-          else
-            echo "❌ فشل الأرشفة"
-            echo "archive_status=failed" >> $GITHUB_ENV
-            echo "=== آخر 20 سطر من سجل الأرشفة ==="
-            tail -20 archive.log
-          fi
-
-      - name: Sanitize Archive Name (للتوافق مع upload-artifact@v4)
-        if: env.archive_status == 'success'
-        id: sanitize_name
-        run: |
-          # إصلاح: إزالة الأحرف غير المتوافقة مع أسماء الملفات
-          SANITIZED_NAME="SimpleTableApp_Archive_${{ github.run_number }}_${{ github.sha }}"
-          SANITIZED_NAME="${SANITIZED_NAME//|/_}"
-          SANITIZED_NAME="${SANITIZED_NAME//\*/_}"
-          SANITIZED_NAME="${SANITIZED_NAME//\//_}"
-          SANITIZED_NAME="${SANITIZED_NAME//\\/_}"
-          SANITIZED_NAME="${SANITIZED_NAME//:/_}"
-          SANITIZED_NAME="${SANITIZED_NAME//\"/_}"
-          SANITIZED_NAME="${SANITIZED_NAME//</_}"
-          SANITIZED_NAME="${SANITIZED_NAME//>/_}"
-          SANITIZED_NAME="${SANITIZED_NAME//?/_}"
-          SANITIZED_NAME="${SANITIZED_NAME// /_}"
-          
-          echo "🧹 الاسم المنسق للأرشيف: $SANITIZED_NAME"
-          echo "sanitized_name=$SANITIZED_NAME" >> $GITHUB_OUTPUT
-
-      - name: Upload App Archive (إصلاح: استخدام v4 بدلاً من v3)
-        if: env.archive_status == 'success'
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ steps.sanitize_name.outputs.sanitized_name }}
-          path: ./build/SimpleTableApp.xcarchive
-          retention-days: 7
-          compression-level: 0
-
-      - name: Run Unit Tests
-        run: |
-          echo "🧪 جاري تشغيل الاختبارات..."
-          xcodebuild test \
-            -project SimpleTableApp.xcodeproj \
-            -scheme SimpleTableApp \
-            -destination 'platform=iOS Simulator,name=iPhone 15,OS=latest' \
-            -enableCodeCoverage YES 2>&1 | tee test.log
-          
-          if [ ${PIPESTATUS[0]} -eq 0 ]; then
-            echo "✅ تم تنفيذ جميع الاختبارات بنجاح"
-          else
-            echo "❌ فشل بعض الاختبارات"
-            echo "=== ملخص سجل الاختبارات ==="
-            grep -A5 -B5 "FAILED\|error:" test.log || tail -30 test.log
-            # لا ننهي العملية هنا، نترك الاختبار يفشل بشكل طبيعي
-          fi
-
-  deploy:
-    needs: build-and-test
-    runs-on: ubuntu-latest
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    
-    steps:
-      - name: Download App Archive (إصلاح: استخدام v4)
-        uses: actions/download-artifact@v4
-        with:
-          pattern: SimpleTableApp_Archive_*
-          path: ./downloaded-artifacts
-
-      - name: List Downloaded Files
-        run: |
-          echo "📁 الملفات التي تم تنزيلها:"
-          find ./downloaded-artifacts -type f -name "*.xcarchive" | head -5
-          echo ""
-          echo "📊 حجم الملفات:"
-          du -sh ./downloaded-artifacts/* 2>/dev/null || echo "لا توجد أرشيفات"
-
-      - name: Create Release Summary
-        run: |
-          echo "## 🚀 بناء تطبيق iOS بنجاح!" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### 📋 معلومات البناء" >> $GITHUB_STEP_SUMMARY
-          echo "- **التطبيق:** SimpleTableApp" >> $GITHUB_STEP_SUMMARY
-          echo "- **رقم البناء:** ${{ github.run_number }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **المرجع:** \`${{ github.sha }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "- **الفرع:** ${{ github.ref_name }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **نظام التشغيل:** macOS (GitHub Runner)" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          
-          echo "### 📦 المخرجات" >> $GITHUB_STEP_SUMMARY
-          echo "تم إنشاء أرشيف التطبيق وجاهز للتحميل." >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          
-          echo "### 🔍 الخطوات التالية" >> $GITHUB_STEP_SUMMARY
-          echo "1. يمكنك تنزيل الأرشيف من تبويب **Artifacts**" >> $GITHUB_STEP_SUMMARY
-          echo "2. استخدم Xcode لتصدير IPA من الأرشيف" >> $GITHUB_STEP_SUMMARY
-          echo "3. نشّر التطبيق على TestFlight أو App Store" >> $GITHUB_STEP_SUMMARY
+      # ... باقي الخطوات تأتي هنا بنفس نمط المسافات
