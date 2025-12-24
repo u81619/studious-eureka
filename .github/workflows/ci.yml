@@ -1,0 +1,60 @@
+name: iOS CI Pipeline
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build-and-test:
+    runs-on: macos-latest
+    
+    steps:
+    - name: التحقق من الكود
+      uses: actions/checkout@v3
+      
+    - name: تحديد إصدار Xcode
+      run: sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+      
+    - name: إظهار إصدار Xcode
+      run: xcodebuild -version
+      
+    - name: بناء المشروع
+      run: |
+        make build
+      
+    - name: تشغيل الاختبارات
+      run: |
+        make test
+      
+    - name: فحص الكود
+      run: |
+        make lint || true
+        
+    - name: إنشاء الأرشيف
+      if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+      run: |
+        make archive
+        
+    - name: رفع الأرشيف
+      if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+      uses: actions/upload-artifact@v3
+      with:
+        name: app-archive
+        path: build/SimpleTableApp.xcarchive
+
+  code-quality:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: التحقق من الكود
+      uses: actions/checkout@v3
+      
+    - name: فحص الملفات
+      run: |
+        echo "📁 هيكل المشروع:"
+        find . -type f -name "*.swift" | head -10
+        echo ""
+        echo "📊 حجم المشروع:"
+        find . -name "*.swift" -exec wc -l {} + | tail -1
