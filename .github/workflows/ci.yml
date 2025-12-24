@@ -15,10 +15,16 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Set up Xcode
+      - name: Set up Xcode (Fixed Version)
         uses: maxim-lobanov/setup-xcode@v1
         with:
-          xcode-version: "15.0"
+          # تم تغيير هذا من '15.0' إلى إصدار متاح حاليًا
+          xcode-version: '16.4'
+
+      - name: Show Xcode version (Verification)
+        run: |
+          xcodebuild -version
+          swift --version
 
       - name: Install Apple Certificate and Provisioning Profile
         env:
@@ -48,6 +54,10 @@ jobs:
           # استيراد الملف التعريفي
           mkdir -p ~/Library/MobileDevice/Provisioning\ Profiles
           cp $PP_PATH ~/Library/MobileDevice/Provisioning\ Profiles/
+          
+          # التحقق من الملفات المستوردة
+          echo "Certificate imported to: $CERTIFICATE_PATH"
+          echo "Provisioning profile copied to: ~/Library/MobileDevice/Provisioning Profiles/"
 
       - name: Build the iOS App
         run: |
@@ -73,19 +83,19 @@ jobs:
       - name: Sanitize Archive Name
         id: sanitize_name
         run: |
-          # استبدال الأحرف الخاصة لضمان توافق اسم الأرشفة مع upload-artifact@v4[citation:10]
+          # استبدال الأحرف الخاصة لضمان توافق اسم الأرشفة مع upload-artifact@v4
           SANITIZED_NAME="SimpleTableApp_Archive_${{ github.run_number }}"
           SANITIZED_NAME="${SANITIZED_NAME//|/_}"
           SANITIZED_NAME="${SANITIZED_NAME//\*/_}"
           echo "sanitized_name=$SANITIZED_NAME" >> $GITHUB_OUTPUT
 
-      - name: Upload App Archive (Updated to v4)
+      - name: Upload App Archive
         uses: actions/upload-artifact@v4
         with:
           name: ${{ steps.sanitize_name.outputs.sanitized_name }}
           path: ./build/SimpleTableApp.xcarchive
           retention-days: 7
-          compression-level: 0 # تعطيل الضغط للملفات الكبيرة لتسريع الرفع[citation:1]
+          compression-level: 0
 
       - name: Run Unit Tests
         run: |
@@ -100,7 +110,7 @@ jobs:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     
     steps:
-      - name: Download App Archive (Updated to v4)
+      - name: Download App Archive
         uses: actions/download-artifact@v4
         with:
           name: ${{ needs.build-and-test.outputs.sanitized_name }}
@@ -108,3 +118,14 @@ jobs:
 
       - name: List Downloaded Files
         run: ls -la ./downloaded-artifact
+
+      - name: Create Release Summary
+        run: |
+          echo "## 🚀 Build Successful" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**App:** SimpleTableApp" >> $GITHUB_STEP_SUMMARY
+          echo "**Build Number:** ${{ github.run_number }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Commit:** ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Artifact:** ${{ needs.build-and-test.outputs.sanitized_name }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "📦 Archive is ready for distribution." >> $GITHUB_STEP_SUMMARY
